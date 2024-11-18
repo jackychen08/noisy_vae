@@ -4,7 +4,27 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from datasets import load_dataset
+
 import os
+import wandb
+from tqdm import tqdm
+
+# Initialize wandb
+wandb.init(
+    project="ML_10701_Project",
+    config={
+        "architecture": "VAE",
+        "dataset": "tiny-imagenet",
+        "epochs": 100,
+        "batch_size": 256,
+        "learning_rate": 1e-3,
+        "latent_dim": 128,
+        "img_channels": 3
+    }
+)
+
+# Access config
+config = wandb.config
 
 transform = transforms.Compose([
     transforms.Resize((64, 64)),
@@ -33,11 +53,11 @@ class ImageDataset(torch.utils.data.Dataset):
 
 train_dataset = ImageDataset(imagenet_train, transform=transform)
 val_dataset = ImageDataset(imagenet_val, transform=transform)
-train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
+train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
 
 class VAE(nn.Module):
-    def __init__(self, img_channels=3, latent_dim=128):
+    def __init__(self, img_channels, latent_dim):
         super(VAE, self).__init__()
         # Encoder
         self.encoder = nn.Sequential(
@@ -81,34 +101,57 @@ def vae_loss(recon_x, x, mu, logvar):
     kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     return recon_loss + kld
 
-# Training loop
-device = torch.device("mps" if torch.cuda.is_available() else "cpu")
-vae = VAE().to(device)
-optimizer = optim.Adam(vae.parameters(), lr=1e-3)
+# Training setup
+device = 'cuda:0'
+vae = VAE(img_channels=config.img_channels, latent_dim=config.latent_dim).to(device)
+optimizer = optim.Adam(vae.parameters(), lr=config.learning_rate)
+
+# Watch the model with wandb
+wandb.watch(vae, log="all", log_freq=10)
 
 # Create directory for saving checkpoints
 os.makedirs("checkpoints", exist_ok=True)
 
-epochs = 10
-for epoch in range(epochs):
+for epoch in tqdm(range(config.epochs), desc='Epochs'):
     vae.train()
     train_loss = 0
-    for batch in train_loader:
+    batch_count = 0
+    
+    for batch in tqdm(train_loader, desc=f'Epoch {epoch+1}', leave=False):
         batch = batch.to(device)
+        
         optimizer.zero_grad()
         recon_batch, mu, logvar = vae(batch)
         loss = vae_loss(recon_batch, batch, mu, logvar)
         loss.backward()
         train_loss += loss.item()
+        batch_count += 1
+
+        wandb.log({
+            "batch_loss": loss.item(),
+            "epoch": epoch,
+            "batch": batch_count
+        })
+
         optimizer.step()
     
-    # Save checkpoint
+    avg_epoch_loss = train_loss / len(train_loader.dataset)
+    
+    wandb.log({
+        "epoch": epoch,
+        "avg_train_loss": avg_epoch_loss,
+    })
+    
     checkpoint_path = f"checkpoints/vae_epoch_{epoch+1}.pth"
-    torch.save({
+    checkpoint = {
         'epoch': epoch + 1,
         'model_state_dict': vae.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
-        'loss': train_loss / len(train_loader.dataset)
-    }, checkpoint_path)
+        'loss': avg_epoch_loss
+    }
+    torch.save(checkpoint, checkpoint_path)
+    wandb.save(checkpoint_path)
     
-    print(f'Epoch {epoch+1}, Loss: {train_loss/len(train_loader.dataset):.4f}')
+    print(f'Epoch {epoch+1}, Loss: {avg_epoch_loss:.4f}')
+
+wandb.finish()
