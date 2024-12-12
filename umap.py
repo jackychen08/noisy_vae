@@ -1,6 +1,6 @@
 import torch
 from sklearn.manifold import TSNE
-import noisy_vae.umap as umap
+import umap
 import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
